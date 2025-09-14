@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Face Shape Detector — HTML/CSS/JS</title>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--accent:#7c3aed;--muted:#94a3b8}
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial;color:#e6eef8;background:linear-gradient(180deg,#071028 0%,#071129 100%)}
+    .wrap{max-width:980px;margin:28px auto;padding:18px;border-radius:12px;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));box-shadow:0 8px 30px rgba(2,6,23,0.6)}
+    h1{margin:6px 0 12px;font-size:20px}
+    .grid{display:grid;grid-template-columns:1fr 320px;gap:14px}
+    .card{background:var(--card);padding:12px;border-radius:12px;min-height:420px}
+    #video{width:100%;height:auto;border-radius:8px;background:#000}
+    canvas#overlay{position:absolute;left:0;top:0}
+    .controls{display:flex;gap:8px;margin:10px 0}
+    button{background:var(--accent);border:none;color:white;padding:8px 12px;border-radius:8px;cursor:pointer}
+    .muted{color:var(--muted);font-size:13px}
+    .result{background:rgba(255,255,255,0.02);padding:10px;border-radius:10px;margin-bottom:10px}
+    .shape-name{font-weight:700;font-size:18px}
+    ul{padding-left:18px;margin:8px 0}
+    .small{font-size:13px}
+    footer{margin-top:12px;color:var(--muted);font-size:13px}
+    @media (max-width:900px){.grid{grid-template-columns:1fr;}.card{min-height:300px}}
+    .confidence-bar{height:8px;background:#0b1320;border-radius:6px;overflow:hidden}
+    .confidence-fill{height:100%;background:linear-gradient(90deg,var(--accent),#3b82f6);width:0%}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Face Shape Detector</h1>
+    <div class="grid">
+      <div class="card" style="position:relative;">
+        <div style="position:relative;">
+          <video id="video" autoplay playsinline></video>
+          <canvas id="overlay"></canvas>
+        </div>
+        <div class="controls">
+          <button id="startBtn">Start Camera</button>
+          <button id="snapshotBtn">Take Snapshot</button>
+          <div class="muted" id="status">Status: idle</div>
+        </div>
+        <div class="muted small">Tip: Allow camera access and make sure your face is centered. Results are heuristic-based.</div>
+      </div>
+
+      <div class="card">
+        <div class="result">
+          <div class="shape-name" id="shape">—</div>
+          <div class="muted small">Confidence</div>
+          <div class="confidence-bar" style="margin-top:6px"><div id="confFill" class="confidence-fill"></div></div>
+        </div>
+
+        <div class="result">
+          <div class="muted small">Measurements (px, relative to video)</div>
+          <ul id="measurements"></ul>
+        </div>
+
+        <div class="result">
+          <div class="muted small">How it works</div>
+          <ul class="small">
+            <li>Detects facial landmarks using MediaPipe Face Mesh.</li>
+            <li>Computes face length and widths at forehead/mid-cheek/jaw levels.</li>
+            <li>Applies simple heuristics to classify shape: oval, round, square, heart, diamond, long.</li>
+          </ul>
+        </div>
+
+        <footer>
+          Want different thresholds or live export? Ask me to tweak the heuristics or UI.<br><br>
+          <a href="https://sites.google.com/view/face-shape-detector-online/" target="_blank">face shape detector ai</a> | 
+          <a href="https://github.com/kumailbalti" target="_blank">kumailbalti</a> | 
+          <a href="https://github.com/kumailbalti/face-shape-detector" target="_blank">face shape detector</a>
+        </footer>
+      </div>
+    </div>
+  </div>
+
+  <!-- MediaPipe FaceMesh CDN and camera utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+
+  <script>
+    // Elements
+    const video = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const startBtn = document.getElementById('startBtn');
+    const snapshotBtn = document.getElementById('snapshotBtn');
+    const statusLabel = document.getElementById('status');
+    const shapeLabel = document.getElementById('shape');
+    const confFill = document.getElementById('confFill');
+    const measurementsList = document.getElementById('measurements');
+
+    let camera = null;
+    let faceMesh = null;
+    const ctx = overlay.getContext('2d');
+
+    function setStatus(s){ statusLabel.innerText = 'Status: ' + s }
+
+    startBtn.addEventListener('click', async ()=>{
+      if(camera){ camera.stop(); camera = null; startBtn.innerText = 'Start Camera'; setStatus('idle'); return; }
+      startBtn.disabled = true;
+      setStatus('starting camera...');
+      try{
+        await startCamera();
+        startBtn.innerText = 'Stop Camera';
+        setStatus('detecting');
+      }catch(err){
+        console.error(err); setStatus('camera error');
+      }
+      startBtn.disabled = false;
+    })
+
+    snapshotBtn.addEventListener('click', ()=>{
+      if(!camera) return alert('Start the camera first');
+      snapshot();
+    })
+
+    async function startCamera(){
+      overlay.width = 640; overlay.height = 480;
+      video.width = 640; video.height = 480;
+
+      faceMesh = new FaceMesh({locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+      }});
+      faceMesh.setOptions({maxNumFaces:1, refineLandmarks:true, minDetectionConfidence:0.5, minTrackingConfidence:0.5});
+      faceMesh.onResults(onResults);
+
+      camera = new Camera(video, {
+        onFrame: async () => { await faceMesh.send({image: video}); },
+        width: 640, height: 480
+      });
+      camera.start();
+    }
+
+    function clearOverlay(){ ctx.clearRect(0,0,overlay.width,overlay.height) }
+
+    function onResults(results){
+      clearOverlay();
+      if(!results.multiFaceLandmarks || results.multiFaceLandmarks.length===0){ setStatus('no face'); shapeLabel.innerText = '—'; confFill.style.width='0%'; measurementsList.innerHTML=''; return; }
+      setStatus('face found');
+      const landmarks = results.multiFaceLandmarks[0];
+      // draw mesh
+      drawConnectors(ctx, landmarks, FACEMESH_TESSELATION, {color:'#6ee7b7', lineWidth:1});
+      drawLandmarks(ctx, landmarks, {color:'#fff', lineWidth:0.5});
+
+      // Convert landmarks (normalized) to pixel coordinates
+      const pts = landmarks.map(p => ({x: p.x * overlay.width, y: p.y * overlay.height}));
+
+      // compute bounding box
+      const xs = pts.map(p=>p.x), ys = pts.map(p=>p.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      const faceW = maxX - minX; const faceH = maxY - minY;
+
+      // helper: width at relative height
+      function widthAt(relY){
+        const yTarget = minY + relY*(faceH);
+        const band = 0.02*overlay.height; // 2% band
+        const inBand = pts.filter(p => Math.abs(p.y - yTarget) <= band);
+        if(inBand.length >= 2){
+          const xs = inBand.map(p=>p.x);
+          return Math.max(...xs) - Math.min(...xs);
+        }
+        // fallback: approximate by linear interpolation between closest points above/below
+        let left = Infinity, right = -Infinity;
+        for(const p of pts){ if(Math.abs(p.y - yTarget) < 0.08*overlay.height){ left = Math.min(left, p.x); right = Math.max(right, p.x); } }
+        if(right>left) return right-left;
+        return faceW; // extreme fallback
+      }
+
+      const foreheadW = widthAt(0.15);
+      const cheekW = widthAt(0.45);
+      const jawW = widthAt(0.85);
+
+      // draw measurement lines
+      ctx.strokeStyle = 'rgba(124,58,237,0.9)'; ctx.lineWidth=2;
+      function drawH(y, label){ ctx.beginPath(); ctx.moveTo(minX-8, y); ctx.lineTo(maxX+8, y); ctx.stroke(); ctx.fillStyle='white'; ctx.fillText(label, maxX+12, y+4); }
+      drawH(minY + 0.15*faceH, `forehead ${Math.round(foreheadW)}`);
+      drawH(minY + 0.45*faceH, `cheek ${Math.round(cheekW)}`);
+      drawH(minY + 0.85*faceH, `jaw ${Math.round(jawW)}`);
+
+      // heuristics
+      const widthMax = Math.max(foreheadW, cheekW, jawW);
+      const lengthToWidth = faceH / widthMax;
+
+      // relative differences
+      function pctDiff(a,b){ return Math.abs(a-b) / ((a+b)/2 + 1e-9); }
+
+      let shape = 'Unknown';
+      let confidence = 0.5;
+
+      // Long / Oblong: face significantly longer than wide
+      if(lengthToWidth > 1.45){ shape = 'Long / Oblong'; confidence = Math.min(0.98, 0.4 + (lengthToWidth-1.45)); }
+      else{
+        // Round: length close to width, widths similar across levels
+        const widthsSimilar = Math.max(foreheadW,cheekW,jawW)/Math.min(foreheadW,cheekW,jawW);
+        if(lengthToWidth < 1.15 && widthsSimilar < 1.18){ shape = 'Round'; confidence = 0.8 - (widthsSimilar-1); }
+        else{
+          // Square: widths similar and jaw is wide (jaw ~ cheek)
+          if(widthsSimilar < 1.18 && pctDiff(jawW, cheekW) < 0.12){ shape = 'Square'; confidence = 0.75; }
+          else{
+            // Heart: forehead wider than cheek and jaw (forehead dominant, jaw narrow)
+            if(foreheadW > cheekW * 1.08 && jawW < cheekW * 0.9){ shape = 'Heart'; confidence = 0.8; }
+            // Diamond: cheekbones are widest (cheekW >> forehead & jaw)
+            else if(cheekW > foreheadW * 1.08 && cheekW > jawW * 1.08){ shape = 'Diamond'; confidence = 0.82; }
+            // Oval: cheek and forehead widths similar, jaw slightly narrower, length moderately > width
+            else if((jawW < cheekW*0.95) && (lengthToWidth > 1.12 && lengthToWidth <= 1.45)){
+              shape = 'Oval'; confidence = 0.85;
+            }
+            else{
+              // fallback choose the level with max width
+              if(cheekW >= foreheadW && cheekW >= jawW) { shape = 'Diamond/Heart-like (wide cheekbones)'; confidence = 0.6; }
+              else if(foreheadW >= cheekW && foreheadW >= jawW) { shape = 'Heart-like (wide forehead)'; confidence = 0.6; }
+              else shape = 'Mixed/Unclear';
+            }
+          }
+        }
+      }
+
+      // clamp confidence
+      confidence = Math.max(0.08, Math.min(0.99, confidence));
+
+      // update UI
+      shapeLabel.innerText = shape;
+      confFill.style.width = Math.round(confidence*100) + '%';
+      measurementsList.innerHTML = '';
+      const add = (k,v)=>{
+        const li = document.createElement('li'); li.innerText = `${k}: ${Math.round(v)} px`; measurementsList.appendChild(li);
+      }
+      add('Face width (bbox)', faceW); add('Face height (bbox)', faceH);
+      add('Forehead width', foreheadW); add('Cheek width', cheekW); add('Jaw width', jawW);
+      add('Length/MaxWidth ratio', (faceH/widthMax).toFixed(2));
+
+    }
+
+    function snapshot(){
+      // draw current overlay to an image
+      const link = document.createElement('a');
+      const tmp = document.createElement('canvas'); tmp.width = overlay.width; tmp.height = overlay.height; const tctx = tmp.getContext('2d');
+      tctx.drawImage(video,0,0,tmp.width,tmp.height);
+      tctx.drawImage(overlay,0,0,tmp.width,tmp.height);
+      link.href = tmp.toDataURL('image/png'); link.download = 'face-snapshot.png'; link.click();
+    }
+
+    // Auto-resize overlay when video size changes
+    video.addEventListener('loadeddata', ()=>{
+      overlay.width = video.videoWidth || 640; overlay.height = video.videoHeight || 480;
+    })
+
+    // Basic helpful errors
+    window.addEventListener('error', e => console.error(e));
+  </script>
+</body>
+</html>
